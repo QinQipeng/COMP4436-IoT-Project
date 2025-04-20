@@ -1,0 +1,131 @@
+version: "3"
+
+volumes:
+  postgresqldata:
+  redisdata:
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto
+    container_name: mosquitto
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+    ports:
+      - "1883:1883"  # MQTT port
+      - "9001:9001"  # Websocket port (optional)
+    restart: unless-stopped
+    networks:
+      - iot-network
+
+  influxdb:
+    image: influxdb:2.6
+    container_name: influxdb
+    ports:
+      - "8086:8086"  # InfluxDB HTTP API
+    volumes:
+      - ./influxdb/data:/var/lib/influxdb2
+    environment:
+    # these configurations arent good for production, only for local testing
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=admin123
+      - DOCKER_INFLUXDB_INIT_ORG=iot
+      - DOCKER_INFLUXDB_INIT_BUCKET=iot_data
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=my-super-secret-token
+    restart: unless-stopped
+    networks:
+      - iot-network
+  
+  # Grafana for Visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"  # Grafana UI
+    volumes:
+      - ./grafana/data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+    depends_on:
+      - influxdb
+    restart: unless-stopped
+    networks:
+      - iot-network
+
+  chirpstack:
+    image: chirpstack/chirpstack:4
+    command: -c /etc/chirpstack
+    restart: unless-stopped
+    volumes:
+      - ./configuration/chirpstack:/etc/chirpstack
+    depends_on:
+      - postgres
+      - mosquitto
+      - redis
+    environment:
+      - MQTT_BROKER_HOST=mosquitto
+      - REDIS_HOST=redis
+      - POSTGRESQL_HOST=postgres
+      - LOG_LEVEL=debug
+    ports:
+      - "8080:8080"
+    networks:
+      - iot-network
+
+
+  chirpstack-gateway-bridge:
+    image: chirpstack/chirpstack-gateway-bridge:4
+    restart: unless-stopped
+    ports:
+      - "1700:1700/udp"
+    volumes:
+      - ./configuration/chirpstack-gateway-bridge:/etc/chirpstack-gateway-bridge
+    environment:
+      - INTEGRATION__MQTT__EVENT_TOPIC_TEMPLATE=as923/gateway/{{ .GatewayID }}/event/{{ .EventType }}
+      - INTEGRATION__MQTT__STATE_TOPIC_TEMPLATE=as923/gateway/{{ .GatewayID }}/state/{{ .StateType }}
+      - INTEGRATION__MQTT__COMMAND_TOPIC_TEMPLATE=as923/gateway/{{ .GatewayID }}/command/#
+    depends_on:
+      - mosquitto
+    networks:
+      - iot-network
+
+  chirpstack-rest-api:
+    image: chirpstack/chirpstack-rest-api:4
+    restart: unless-stopped
+    command: --server chirpstack:8080 --bind 0.0.0.0:8090 --insecure
+    ports:
+      - "8090:8090"
+    depends_on:
+      - chirpstack
+    networks:
+      - iot-network
+
+  postgres:
+    image: postgres:14-alpine
+    restart: unless-stopped
+    volumes:
+      - ./configuration/postgresql/initdb:/docker-entrypoint-initdb.d
+      - postgresqldata:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=chirpstack
+      - POSTGRES_PASSWORD=chirpstack
+      - POSTGRES_DB=chirpstack
+    networks:
+      - iot-network
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save 300 1 --save 60 100 --appendonly no
+    volumes:
+      - redisdata:/data
+    networks:
+      - iot-network
+
+# Docker Network
+networks:
+  iot-network:
+    driver: bridge
